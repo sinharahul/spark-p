@@ -55,7 +55,7 @@ object CreditCard {
          group by Class
       """.stripMargin).show(10)
     //0.0017304750013189597
-    val fractions = Map(1 -> 0.0017304750013189597, 0 -> 1.0)
+    val fractions = Map(1 -> 1.0 , 0 -> 0.0017304750013189597)
     val churnDF = amountDf.stat.sampleBy("Class", fractions, 12345L)
     churnDF.groupBy("Class").count.show()
     //val arr=MLUtils.kFold(amountDf.toDF().toJavaRDD.rdd,5,0)
