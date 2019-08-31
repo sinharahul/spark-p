@@ -1,10 +1,12 @@
 package explore
 
 import breeze.numerics.round
+import org.apache.spark.ml.classification.LogisticRegression
 import org.apache.spark.ml.feature.{StandardScaler, VectorAssembler}
+import org.apache.spark.ml.stat.Correlation
 import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 //https://www.kaggle.com/mlg-ulb/creditcardfraud#creditcard.csv
 //https://www.kaggle.com/janiobachmann/credit-fraud-dealing-with-imbalanced-datasets
 /**
@@ -48,6 +50,7 @@ object CreditCard {
     amountDf=new StandardScaler().setInputCol("time_assem").setOutputCol("scaledTime")
       .fit(amountDf).transform(amountDf)
     amountDf.show(10)
+    amountDf=amountDf.drop("Amount","Time")
     amountDf.createOrReplaceTempView("creditcard")
     spark.sql(
       """
@@ -58,31 +61,73 @@ object CreditCard {
     val fractions = Map(1 -> 1.0 , 0 -> 0.0017304750013189597)
     val churnDF = amountDf.stat.sampleBy("Class", fractions, 12345L)
     churnDF.groupBy("Class").count.show()
-    //val arr=MLUtils.kFold(amountDf.toDF().toJavaRDD.rdd,5,0)
-   // amountDf.stat.sampleBy()
-    /**
-    for(a<-arr){
-      val (x,y) = a
-      println(s"x=${x.foreach(println)} y= ${y.foreach(println)}")
+
+    def createRandomDF(amountDf:DataFrame)={
+      val sampledAmountDf=amountDf.sample(1)
+      val fraud_df:Dataset[Row]=sampledAmountDf.where("Class=1")
+      val non_fraud_df:Dataset[Row]=sampledAmountDf.where("Class=0").limit(492)
+      fraud_df.union(non_fraud_df)
     }
-      */
-    //foldedRDD.foreach(rdd=>rdd.toDF().show(1))
-    //  println("No Frauds", round(df['Class'].value_counts()[0]/len(df) * 100,2), '% of the dataset')
-    //println('Frauds', round(df['Class'].value_counts()[1]/len(df) * 100,2), '% of the dataset')
-   // val amount = new StandardScaler().fit(trainInput.columns.filter(c=>c.equals("Amount"))
-//    val amountDf=new StandardScaler().setInputCol("Amount").setOutputCol("scaledAmount")
-//        .fit(trainInput).transform(trainInput)
-    /**
+
+    val new_df=createRandomDF(amountDf)
+    new_df.createOrReplaceTempView("creditcard1")
+    spark.sql(
+      """
+        SELECT count(*),Class from creditcard1
+         group by Class
+      """.stripMargin).show(10)
+    new_df.show(10)
+    def selectCols(newDf:DataFrame):Array[String]={
+      newDf.columns.filter(col=>col.startsWith("V")||col.startsWith("scaled"))
+    }
+    selectCols(new_df).foreach(println)
+    val va=new VectorAssembler().setInputCols(selectCols(new_df))
+      .setOutputCol("features")
+    val numFolds = 10
+    val MaxIter: Seq[Int] = Seq(100)
+    val RegParam: Seq[Double] = Seq(1.0) // L2 regularization param, set 1.0 with L1 regularization
+    val Tol: Seq[Double] = Seq(1e-8)// for convergence tolerance for iterative algorithms
+    val ElasticNetParam: Seq[Double] = Seq(0.0001) //Combination of L1 & L2
+    val lr = new LogisticRegression()
+             .setLabelCol("Class")
+             .setFeaturesCol("features")
+
+    import org.apache.spark._
+    import org.apache.spark.sql.SparkSession
     import org.apache.spark.sql.functions._
-    import spark.implicits._
-    //https://stackoverflow.com/posts/50166298/edit
-    val (mean_amount, std_amount) = trainInput.select(mean("Amount"), stddev("Amount"))
-      .as[(Double, Double)]
-      .first()
-  //  amountDf.show(10)
-    val trainInput1=trainInput.withColumn("amount_scaled", ($"Amount" - mean_amount) / std_amount)
-    trainInput1.show(10)
-  */
+    import org.apache.spark.ml.classification.{BinaryLogisticRegressionSummary, LogisticRegression, LogisticRegressionModel}
+    import org.apache.spark.ml.Pipeline
+    import org.apache.spark.ml.tuning.{ParamGridBuilder, CrossValidator}
+    import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
+    import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
+    import org.apache.spark.mllib.linalg._
+    import org.apache.spark.mllib.stat.Statistics
+    import org.apache.spark.rdd.RDD
+    val pipeline = new Pipeline()
+                    .setStages(Array( va, lr))
+
+    val paramGrid = new ParamGridBuilder()
+                        .addGrid(lr.maxIter, MaxIter)
+                        .addGrid(lr.regParam, RegParam)
+                        .addGrid(lr.tol, Tol)
+                        .addGrid(lr.elasticNetParam, ElasticNetParam)
+                        .build()
+    val evaluator = new BinaryClassificationEvaluator()
+                        .setLabelCol("Class")
+                        .setRawPredictionCol("prediction")
+    val crossval = new CrossValidator()
+                      .setEstimator(pipeline)
+                      .setEvaluator(evaluator)
+                      .setEstimatorParamMaps(paramGrid)
+                      .setNumFolds(numFolds)
+    val arr=new_df.randomSplit(Array(0.8,0.2))
+    val (trainDF,testDF)=(arr(0),arr(1))
+    trainDF.cache()
+    val cvModel = crossval.fit(trainDF)
+    val predictions = cvModel.transform(testDF)
+    val result = predictions.select("Class", "prediction", "probability")
+    val resutDF = result.withColumnRenamed("prediction", "Predicted_label")
+    resutDF.show(10)
     spark.stop()
   }
 
