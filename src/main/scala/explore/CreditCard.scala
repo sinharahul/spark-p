@@ -128,6 +128,8 @@ object CreditCard {
     val result = predictions.select("Class", "prediction", "probability")
     val resutDF = result.withColumnRenamed("prediction", "Predicted_label")
     resutDF.show(10)
+    val accuracy = evaluator.evaluate(predictions)
+    println("Classification accuracy: " + accuracy)
     spark.stop()
   }
 
